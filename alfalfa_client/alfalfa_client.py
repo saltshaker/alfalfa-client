@@ -145,7 +145,7 @@ class AlfalfaClient:
             if current_status == desired_status.upper():
                 return
             sleep(2)
-        raise AlfalfaClientException(f"'wait' timed out waiting for status: '{desired_status}', curren status: '{current_status}'")
+        raise AlfalfaClientException(f"'wait' timed out waiting for status: '{desired_status}', current status: '{current_status}'")
 
     def upload_model(self, model_path: os.PathLike) -> ModelID:
         """Upload a model to alfalfa
@@ -185,18 +185,23 @@ class AlfalfaClient:
         :returns: id of run created"""
         response = self._request(f"models/{model_id}/createRun")
         run_id = response.json()["payload"]["runId"]
+        if not(self.logger is None):
+            self.logger.debug(f"[create_run] Run id: {run_id}, response code: {response.status_code}")
 
         if wait_for_status:
-            self.wait(run_id, "ready", timeout=120)
-
-        if retries > 0:
-            self.delete_run(run_id)
-            run_id = self.create_run_from_model(model_id, wait_for_status, retries-1)
+            try:
+                self.wait(run_id, "ready", timeout=120)
+            except AlfalfaClientException as e:
+                if retries > 0:
+                    self.delete_run(run_id)
+                    run_id = self.create_run_from_model(model_id, wait_for_status, retries-1)
+                else:
+                    raise e
 
         return run_id
 
     @parallelize
-    def submit(self, model_path: Union[str, List[str]], wait_for_status: bool = True) -> RunID:
+    def submit(self, model_path: Union[str, List[str]], wait_for_status: bool = True, retries: int = 0) -> RunID:
         """Submit a model to alfalfa
 
         :param model_path: path to the model to upload or list of paths
@@ -209,7 +214,7 @@ class AlfalfaClient:
 
         # After the file has been uploaded, then tell BOPTEST to process the run
         # This is done not via the haystack api, but through a REST api
-        run_id = self.create_run_from_model(model_id, wait_for_status=wait_for_status)
+        run_id = self.create_run_from_model(model_id, wait_for_status=wait_for_status, retries=retries)
 
         return run_id
 
@@ -245,6 +250,8 @@ class AlfalfaClient:
         }
 
         response = self._request(f"runs/{run_id}/start", parameters=parameters)
+        if not(self.logger is None):
+            self.logger.debug(f"[start] Run id: {run_id}, response code: {response.status_code}")
 
         assert response.status_code == 204, "Got wrong status_code from alfalfa"
 
