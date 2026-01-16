@@ -34,6 +34,7 @@ from datetime import datetime
 from time import sleep, time
 from typing import List, Union
 from urllib.parse import urljoin
+from logging import Logger
 
 import requests
 from requests_toolbelt import MultipartEncoder
@@ -53,7 +54,7 @@ RunID = str
 class AlfalfaClient:
     """AlfalfaClient is a wrapper for the Alfalfa REST API"""
 
-    def __init__(self, host: str = 'http://localhost', api_version: str = 'v2'):
+    def __init__(self, host: str = 'http://localhost', api_version: str = 'v2', logger: Logger = None):
         """Create a new alfalfa client instance
 
         :param host: url for host of alfalfa web server
@@ -69,6 +70,8 @@ class AlfalfaClient:
         self.host = host
         self.api_version = api_version
         self.point_translation_map = {}
+
+        self.logger = logger
 
     @property
     def url(self):
@@ -110,12 +113,13 @@ class AlfalfaClient:
         return response["payload"]["errorLog"]
 
     @parallelize
-    def wait(self, run_id: Union[RunID, List[RunID]], desired_status: str, timeout: float = 600) -> None:
-        """Wait for a run to have a certain status or timeout with error
+    def wait(self, run_id: Union[RunID, List[RunID]], desired_status: str, timeout: float =600) -> None:
+        """
+        Wait for a run to have a certain status or timeout with error
 
-        :param run_id: id of run or list of ids
+        :param run_id: id of run of list of ids
         :param desired_status: status to wait for
-        :param timeout: timeout length in seconds
+        :param timout: timeout length in seconds
         """
 
         start_time = time()
@@ -127,18 +131,21 @@ class AlfalfaClient:
             except AlfalfaAPIException as e:
                 if e.response.status_code != 404:
                     raise e
-
+                
             if current_status == "ERROR":
                 error_log = self.get_error_log(run_id)
                 raise AlfalfaException(error_log)
-
+            
             if current_status != previous_status:
-                print("Desired status: {}\t\tCurrent status: {}".format(desired_status, current_status))
+                if not(self.logger is None):
+                    self.logger.info("Desired status: {}\t\tCurrent status: {}".format(desired_status, current_status))
+                else:
+                    print("Desired status: {}\t\tCurrent status: {}".format(desired_status, current_status))
                 previous_status = current_status
             if current_status == desired_status.upper():
                 return
             sleep(2)
-        raise AlfalfaClientException(f"'wait' timed out waiting for status: '{desired_status}', current status: '{current_status}'")
+        raise AlfalfaClientException(f"'wait' timed out waiting for status: '{desired_status}', curren status: '{current_status}'")
 
     def upload_model(self, model_path: os.PathLike) -> ModelID:
         """Upload a model to alfalfa
@@ -168,18 +175,23 @@ class AlfalfaClient:
 
         return model_id
 
-    def create_run_from_model(self, model_id: Union[ModelID, List[ModelID]], wait_for_status: bool = True) -> RunID:
+    def create_run_from_model(self, model_id: Union[ModelID, List[ModelID]], wait_for_status: bool = True, retries: int = 0) -> RunID:
         """Create a run from a model
 
         :param model_id: id of model to create a run from or list of ids
         :param wait_for_status: wait for model to be "READY" before returning
+        :param retries: number of times to retry run creation
 
         :returns: id of run created"""
         response = self._request(f"models/{model_id}/createRun")
         run_id = response.json()["payload"]["runId"]
 
         if wait_for_status:
-            self.wait(run_id, "ready")
+            self.wait(run_id, "ready", timeout=120)
+
+        if retries > 0:
+            self.delete_run(run_id)
+            run_id = self.create_run_from_model(model_id, wait_for_status, retries-1)
 
         return run_id
 
@@ -200,6 +212,17 @@ class AlfalfaClient:
         run_id = self.create_run_from_model(model_id, wait_for_status=wait_for_status)
 
         return run_id
+
+    @parallelize
+    def delete_run(self, run_id: Union[RunID, List[RunID]]):
+        """
+        Delete a specified run
+
+        :param run_id: id of run to delete
+        """
+        response = self._request(f"runs/{run_id}", method="DELETE")
+
+        assert response.status_code == 204, "Got wrong status_code from alfalfa"
 
     @parallelize
     def start(self, run_id: Union[RunID, List[RunID]], start_datetime: datetime, end_datetime: datetime, timescale: int = 5, external_clock: bool = False, realtime: bool = False, wait_for_status: bool = True):
@@ -244,11 +267,18 @@ class AlfalfaClient:
             self.wait(run_id, "complete")
 
     @parallelize
-    def advance(self, run_id: Union[RunID, List[RunID]]) -> None:
-        """Advance a run 1 timestep
+    def advance(self, run_id: Union[RunID, List[RunID]]) -> bool:
+        """
+        Advance a run 1 timestep
 
-        :param run_id: id of run or list of ids"""
-        self._request(f"runs/{run_id}/advance")
+        :param run_id: id of run or list of ids
+        :returns: run advanced successfully
+        """
+        try:
+            self._request(f"runs/{run_id}/advance")
+            return True
+        except requests.exceptions.ConnectionError:
+            return False
 
     def get_inputs(self, run_id: str) -> List[str]:
         """Get inputs of run
@@ -322,6 +352,82 @@ class AlfalfaClient:
         response = self._request(f"aliases/{alias}", method="GET")
         response_body = response.json()["payload"]
         return response_body
+
+    def get_all_runs(self) -> List[RunID]:
+        """
+        Get run_ids of all runs
+
+        :returns: run_ids
+        """
+        response = self._request("runs/", method="GET")
+        response_body = response.json()["payload"]
+
+        run_ids = []
+        for run in response_body:
+            run_ids.append(run["id"])
+
+        return run_ids
+    
+    def get_active_runs(self) -> List[RunID]:
+        """
+        Get all runs currently 'running'
+
+        :returns: run_ids
+        """
+        response = self._request("runs/", method="GET")
+        response_body = response.json()["payload"]
+
+        run_ids = []
+        for run in response_body:
+            if run["status"] == "RUNNING":
+                run_ids.append(run["id"])
+
+        return run_ids
+    
+    def get_complete_runs(self) -> List[RunID]:
+        """
+        Gets all runs currently 'complete'
+
+        :returns: run_ids
+        """
+        response = self._request("runs/", method="GET")
+        response_body = response.json()["payload"]
+
+        run_ids = []
+        for run in response_body:
+            if run["status"] == "COMPLETE":
+                run_ids.append(run["id"])
+
+        return run_ids
+    
+    def get_idle_runs(self) -> List[RunID]:
+        """
+        Gets all runs that are 'running' but are not actively being advanced
+
+        :returns: run_ids
+        """
+        response = self._request("runs/", method="GET")
+        response_body = response.json()["payload"]
+
+        run_ids = []
+        for run in response_body:
+            run_ids.append(run["id"])
+        idle_ids = self.check_idle(run_ids, 120)
+        return [run_ids[i] for i in range(0, len(run_ids)) if idle_ids[i]]
+    
+    def check_idle(self, run_ids:list[str], idle_time:float) -> List[bool]:
+        """
+        Checks specified runs to determine if they are idle
+
+        :param run_ids: ids of runs to check
+        :param idle_time: time in seconds for a run to be considered idle
+        :returns: idle status of each run
+        """
+        currentTime = self.get_sim_time(run_ids)
+        sleep(idle_time)
+        newTime = self.get_sim_time(run_ids)
+
+        return currentTime == newTime
 
     def _get_point_translation(self, *args):
         if args in self.point_translation_map:
