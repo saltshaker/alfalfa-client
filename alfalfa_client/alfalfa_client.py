@@ -175,12 +175,11 @@ class AlfalfaClient:
 
         return model_id
 
-    def create_run_from_model(self, model_id: Union[ModelID, List[ModelID]], wait_for_status: bool = True, retries: int = 0) -> RunID:
+    def create_run_from_model(self, model_id: Union[ModelID, List[ModelID]], wait_for_status: bool = True) -> RunID:
         """Create a run from a model
 
         :param model_id: id of model to create a run from or list of ids
         :param wait_for_status: wait for model to be "READY" before returning
-        :param retries: number of times to retry run creation
 
         :returns: id of run created"""
         response = self._request(f"models/{model_id}/createRun")
@@ -189,19 +188,13 @@ class AlfalfaClient:
             self.logger.debug(f"[create_run] Run id: {run_id}, response code: {response.status_code}")
 
         if wait_for_status:
-            try:
-                self.wait(run_id, "ready", timeout=120)
-            except AlfalfaClientException as e:
-                if retries > 0:
-                    self.delete_run(run_id)
-                    run_id = self.create_run_from_model(model_id, wait_for_status, retries-1)
-                else:
-                    raise e
+            self.wait(run_id, "ready", timeout=120)
+            
 
         return run_id
 
     @parallelize
-    def submit(self, model_path: Union[str, List[str]], wait_for_status: bool = True, retries: int = 0) -> RunID:
+    def submit(self, model_path: Union[str, List[str]], wait_for_status: bool = True) -> RunID:
         """Submit a model to alfalfa
 
         :param model_path: path to the model to upload or list of paths
@@ -214,7 +207,7 @@ class AlfalfaClient:
 
         # After the file has been uploaded, then tell BOPTEST to process the run
         # This is done not via the haystack api, but through a REST api
-        run_id = self.create_run_from_model(model_id, wait_for_status=wait_for_status, retries=retries)
+        run_id = self.create_run_from_model(model_id, wait_for_status=wait_for_status)
 
         return run_id
 
